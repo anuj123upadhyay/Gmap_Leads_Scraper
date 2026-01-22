@@ -94,12 +94,12 @@ const crawler = new PlaywrightCrawler({
     // Request handling options
     maxRequestRetries: 5,
     maxRequestsPerCrawl: searchTerms.length * maxItems * 2, // Account for detail pages
-    requestHandlerTimeoutSecs: 180, // 3 minutes per request
-    navigationTimeoutSecs: 60,
+    requestHandlerTimeoutSecs: 120, // Reduced from 180 → 120 seconds
+    navigationTimeoutSecs: 60, // Reduced from 90 → 60 seconds
 
     // Performance and resource management
-    maxConcurrency: 5,
-    minConcurrency: 1,
+    maxConcurrency: 10, // Increased from 5 → 10 for faster parallel processing
+    minConcurrency: 2,  // Increased from 1 → 2
 
     // Browser launch configuration
     launchContext: {
@@ -129,6 +129,19 @@ const crawler = new PlaywrightCrawler({
             },
         },
     },
+
+    // Pre-navigation hook for additional setup
+    preNavigationHooks: [
+        async ({ page, request, log: hookLog }) => {
+            // Set additional headers
+            await page.setExtraHTTPHeaders({
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            });
+
+            hookLog.info(`Navigating to: ${request.url}`);
+        },
+    ],
 
     // Error handling
     failedRequestHandler: async ({ request, log: requestLog }, error) => {

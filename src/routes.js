@@ -32,11 +32,47 @@ router.addHandler('LIST', async ({ page, request, log, crawler }) => {
         // Accept cookies if present
         await handleCookieConsent(page, log);
 
-        // Wait for search results sidebar
-        const sidebarSelector = 'div[role="feed"]';
-        await page.waitForSelector(sidebarSelector, { timeout: 20000 }).catch(() => {
-            throw new Error('Could not find results sidebar');
-        });
+        // Wait for page to be fully loaded
+        await page.waitForLoadState('domcontentloaded');
+        await sleep(1500); // Reduced from 3000ms → 1500ms (50% faster)
+
+        // Try multiple selectors for the results sidebar
+        const sidebarSelectors = [
+            'div[role="feed"]',
+            'div[role="main"]',
+            'div.m6QErb.DxyBCb.kA9KIf.dS8AEf',
+            '[aria-label*="Results"]',
+        ];
+
+        let sidebarSelector = null;
+        for (const selector of sidebarSelectors) {
+            try {
+                await page.waitForSelector(selector, { timeout: 10000 });
+                sidebarSelector = selector;
+                log.info(`Found results sidebar with selector: ${selector}`);
+                break;
+            } catch {
+                log.debug(`Selector ${selector} not found, trying next...`);
+            }
+        }
+
+        if (!sidebarSelector) {
+            // Take a screenshot for debugging
+            const screenshotBuffer = await page.screenshot({ fullPage: false });
+            await Actor.setValue('debug-screenshot', screenshotBuffer, { contentType: 'image/png' });
+            
+            // Log page content for debugging
+            const pageTitle = await page.title();
+            const pageUrl = page.url();
+            
+            log.error('Failed to find results sidebar', {
+                pageTitle,
+                pageUrl,
+                triedSelectors: sidebarSelectors,
+            });
+            
+            throw new Error(`Could not find results sidebar with any selector. Page title: "${pageTitle}". Screenshot saved to key-value store as "debug-screenshot".`);
+        }
 
         log.info('Results sidebar found, starting to scroll and extract');
 
@@ -47,7 +83,7 @@ router.addHandler('LIST', async ({ page, request, log, crawler }) => {
         }
 
         // Auto-scroll to load all results
-        const businessLinks = await autoScrollAndExtract(page, scrollContainer, maxItems, scrollDelay, searchTerm, log);
+        const businessLinks = await autoScrollAndExtract(page, scrollContainer, maxItems, scrollDelay, searchTerm, sidebarSelector, log);
 
         log.info(`Found ${businessLinks.length} businesses for: ${searchTerm}`);
 
@@ -150,16 +186,48 @@ router.addHandler('DETAIL', async ({ page, request, log }) => {
  * Auto-scroll the results sidebar to load more businesses
  * Returns array of business data extracted from the list
  */
-async function autoScrollAndExtract(page, scrollContainer, maxItems, scrollDelay, searchTerm, log) {
+async function autoScrollAndExtract(page, scrollContainer, maxItems, scrollDelay, searchTerm, sidebarSelector, log) {
     const businesses = [];
     const seenUrls = new Set();
     let scrollAttempts = 0;
     const maxScrollAttempts = 50;
     let noNewResultsCount = 0;
 
+    log.info(`Using sidebar selector: ${sidebarSelector} for extraction`);
+
     while (businesses.length < maxItems && scrollAttempts < maxScrollAttempts) {
         // Extract currently visible businesses - using more flexible selectors
-        const currentBusinesses = await page.$$eval('div[role="feed"] a[href*="/maps/place/"]', (elements) => {
+        
+        // First, let's check if we can find ANY links
+        const totalLinks = await page.$$eval('a[href*="/maps/place/"]', (links) => links.length);
+        log.info(`📊 Total links with /maps/place/ found on page: ${totalLinks}`);
+        
+        // Debug: What does the page actually contain?
+        const pageDebug = await page.evaluate(() => {
+            const sidebar = document.querySelector('div[role="main"]') || document.querySelector('div[role="feed"]');
+            if (!sidebar) return { error: 'No sidebar found' };
+            
+            const allLinks = sidebar.querySelectorAll('a');
+            const allDivs = sidebar.querySelectorAll('div');
+            
+            return {
+                totalLinks: allLinks.length,
+                totalDivs: allDivs.length,
+                sampleLinkHrefs: Array.from(allLinks).slice(0, 5).map(a => a.href),
+                sampleText: sidebar.textContent?.substring(0, 200),
+            };
+        });
+        log.info('📋 Page debug info:', pageDebug);
+        
+        // Try multiple extraction strategies
+        let currentBusinesses = [];
+        
+        // Strategy 1: Try with the sidebar selector that actually worked
+        try {
+            const strategy1Selector = `${sidebarSelector} a[href*="/maps/place/"]`;
+            log.debug(`Strategy 1: Trying selector: ${strategy1Selector}`);
+            
+            currentBusinesses = await page.$$eval(strategy1Selector, (elements) => {
             return elements
                 .map((el) => {
                     try {
@@ -250,12 +318,56 @@ async function autoScrollAndExtract(page, scrollContainer, maxItems, scrollDelay
                             phone: null,
                             website: null,
                         };
-                    } catch (err) {
+                    } catch {
                         return null;
                     }
                 })
                 .filter((item) => item && item.name && item.detailUrl);
-        });
+            });
+            
+            log.info(`Strategy 1 found ${currentBusinesses.length} businesses`);
+        } catch (feedError) {
+            log.warning('Strategy 1 failed, trying alternative:', feedError.message);
+            currentBusinesses = [];
+        }
+        
+        // Strategy 2: If Strategy 1 failed or found nothing, try without sidebar wrapper
+        if (currentBusinesses.length === 0) {
+            try {
+                log.info('Trying Strategy 2: Direct link extraction without wrapper');
+                currentBusinesses = await page.$$eval('a[href*="/maps/place/"]', (elements) => {
+                    return elements
+                        .slice(0, 20) // Limit to first 20 to avoid processing too many
+                        .map((el) => {
+                            try {
+                                // Get aria-label as business name
+                                const name = el.getAttribute('aria-label')?.trim() || '';
+                                if (!name || name.length < 2) return null;
+                                
+                                const detailUrl = el.href;
+                                
+                                return {
+                                    name,
+                                    address: '',
+                                    rating: null,
+                                    reviewCount: null,
+                                    category: '',
+                                    detailUrl,
+                                    phone: null,
+                                    website: null,
+                                };
+                            } catch {
+                                return null;
+                            }
+                        })
+                        .filter((item) => item && item.name && item.detailUrl);
+                });
+                log.info(`Strategy 2 found ${currentBusinesses.length} businesses`);
+            } catch (directError) {
+                log.error('Strategy 2 also failed:', directError.message);
+                currentBusinesses = [];
+            }
+        }
 
         // Add new businesses
         const previousCount = businesses.length;
@@ -267,6 +379,14 @@ async function autoScrollAndExtract(page, scrollContainer, maxItems, scrollDelay
         }
 
         const newCount = businesses.length - previousCount;
+        
+        // If this is the first scroll and we found nothing, take a screenshot
+        if (scrollAttempts === 0 && businesses.length === 0) {
+            log.warning('⚠️ First scroll attempt found 0 businesses - taking debug screenshot');
+            const screenshotBuffer = await page.screenshot({ fullPage: false });
+            await Actor.setValue('debug-no-results-screenshot', screenshotBuffer, { contentType: 'image/png' });
+        }
+
 
         if (newCount === 0) {
             noNewResultsCount++;
@@ -415,29 +535,50 @@ async function extractReviewCount(page) {
  */
 async function handleCookieConsent(page, log) {
     try {
+        // Wait a bit for any overlays to appear - reduced from 2000ms to 1000ms
+        await sleep(1000);
+
         const cookieSelectors = [
             'button:has-text("Accept all")',
             'button:has-text("I agree")',
             'button:has-text("Accept")',
+            'button:has-text("Reject all")', // Sometimes we need to reject instead
             'button[aria-label*="Accept" i]',
+            'button[jsname="higCR"]', // Google's specific button
+            'form[action*="consent"] button',
         ];
 
         for (const selector of cookieSelectors) {
             try {
                 const button = await page.$(selector);
-                if (button) {
+                if (button && await button.isVisible()) {
                     await button.click();
-                    log.debug('Clicked cookie consent button');
-                    await sleep(1000);
+                    log.info(`Clicked cookie consent button: ${selector}`);
+                    await sleep(2000);
                     return;
                 }
-            } catch {
+            } catch (err) {
                 // Continue to next selector
+                log.debug(`Cookie selector ${selector} failed:`, err.message);
             }
         }
+
+        // Alternative: Try to find and dismiss any overlay/modal
+        try {
+            const overlays = await page.$$('div[role="dialog"], div[role="presentation"], .consent-bump');
+            if (overlays.length > 0) {
+                log.info(`Found ${overlays.length} potential overlay(s), attempting to handle`);
+                // Try pressing Escape key
+                await page.keyboard.press('Escape');
+                await sleep(1000);
+            }
+        } catch {
+            log.debug('No overlays found or escape failed');
+        }
+
     } catch {
         // Cookie consent not found or already accepted
-        log.debug('No cookie consent found');
+        log.debug('Cookie consent handling completed or not needed');
     }
 }
 
