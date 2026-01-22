@@ -1,0 +1,17 @@
+{
+    "actorSpecification": 1,
+    "name": "local-business-lead-miner",
+    "title": "Local Business Lead Miner",
+    "description": "High-performance Apify Actor for scraping local business leads from Google Maps with advanced anti-blocking measures",
+    "version": "1.0",
+    "meta": {
+        "templateId": "js-crawlee-playwright-chrome",
+        "generatedBy": "Senior Node.js Developer"
+    },
+    "input": "./input_schema.json",
+    "output": "./output_schema.json",
+    "storages": {
+        "dataset": "./dataset_schema.json"
+    },
+    "dockerfile": "../Dockerfile"
+}

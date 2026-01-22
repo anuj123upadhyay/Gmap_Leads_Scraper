@@ -1,0 +1,30 @@
+{
+    "name": "local-business-lead-miner",
+    "version": "1.0.0",
+    "type": "module",
+    "description": "High-performance Apify Actor for scraping local business leads from Google Maps",
+    "dependencies": {
+        "apify": "^3.5.2",
+        "crawlee": "^3.15.3",
+        "@crawlee/playwright": "^3.15.3",
+        "playwright": "1.57.0",
+        "ghost-cursor": "^1.1.19"
+    },
+    "devDependencies": {
+        "@apify/eslint-config": "^1.0.0",
+        "eslint": "^9.29.0",
+        "eslint-config-prettier": "^10.1.5",
+        "prettier": "^3.5.3"
+    },
+    "scripts": {
+        "start": "node src/main.js",
+        "format": "prettier --write .",
+        "format:check": "prettier --check .",
+        "lint": "eslint",
+        "lint:fix": "eslint --fix",
+        "test": "echo \"Error: oops, the Actor has no tests yet, sad!\" && exit 1",
+        "postinstall": "npx crawlee install-playwright-browsers"
+    },
+    "author": "Senior Node.js Developer",
+    "license": "ISC"
+}

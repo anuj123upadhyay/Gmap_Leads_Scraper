@@ -1,0 +1,28 @@
+# This file tells Git which files shouldn't be added to source control
+
+.DS_Store
+.idea
+.vscode
+.zed
+dist
+node_modules
+apify_storage
+storage
+
+# Environment variables
+.env
+.env.local
+
+# Logs
+*.log
+logs/
+
+# Playwright browsers
+.cache/ms-playwright/
+
+# Added by Apify CLI
+.venv
+
+# OS files
+Thumbs.db
+
