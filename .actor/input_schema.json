@@ -49,10 +49,10 @@
             "default": false
         },
         "scrollDelay": {
-            "title": "Scroll Delay (ms)",
+            "title": "Max Scroll Delay (ms)",
             "type": "integer",
-            "description": "Delay between scroll actions to load more results",
-            "default": 800,
+            "description": "Maximum time (ms) to wait between scroll actions. The actor uses adaptive waiting — it moves on as soon as new results appear, so real wait is usually much shorter than this value. Lower = faster (min 500 ms). Raise if you hit blocks.",
+            "default": 1200,
             "minimum": 500,
             "maximum": 5000
         }

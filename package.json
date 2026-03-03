@@ -1,6 +1,6 @@
 {
     "name": "local-business-lead-miner",
-    "version": "1.0.0",
+    "version": "2.0.2",
     "type": "module",
     "description": "High-performance Apify Actor for scraping local business leads from Google Maps",
     "dependencies": {

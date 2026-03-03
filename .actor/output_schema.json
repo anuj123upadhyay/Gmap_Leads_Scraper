@@ -1,10 +1,10 @@
 {
     "actorOutputSchemaVersion": 1,
-    "title": "Output schema",
+    "title": "Business Leads Output",
     "properties": {
         "overview": {
             "type": "string",
-            "title": "Overview",
+            "title": "Download Business Leads",
             "template": "{{links.apiDefaultDatasetUrl}}/items?view=overview"
         }
     }
