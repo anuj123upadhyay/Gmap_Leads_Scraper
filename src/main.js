@@ -1,18 +1,21 @@
 /**
- * Local Business Lead Miner - High-Performance Google Maps Scraper
+ * Local Business Lead Miner v3.0 — Pay Per Event (PPE) Edition
  * Built with Apify SDK v3 and Crawlee PlaywrightCrawler
- * Handles dynamic rendering, auto-scrolling, and anti-blocking measures
  *
- * v2.0 — Performance & Data-Quality Rewrite
- *  • Eliminated redundant networkidle waits (was wasting up to 30s per page)
- *  • Adaptive scroll delay: waits for real DOM change, not a fixed timer
- *  • Rich data extracted entirely from LIST view — no detail-page visits needed
- *    for the common case (phone + website parsed from sidebar cards)
- *  • DETAIL pages are still visited as a reliable fallback when list-view data
- *    is genuinely missing, ensuring 100 % data completeness for customers
- *  • Concurrency tuned: 3 LIST workers + up to 15 parallel DETAIL workers
- *  • Block-list for media/fonts/analytics to cut per-page bandwidth ~60 %
- *  • Graceful abort handler to stop cleanly when user cancels the run
+ * Pricing: $0.051 per lead ($51 per 1,000 leads)
+ *
+ * PPE features:
+ *  • Charges $0.051 per extracted lead via Actor.charge()
+ *  • Respects user spending limits (ACTOR_MAX_TOTAL_CHARGE_USD)
+ *  • Gracefully aborts crawler when charge limit is reached
+ *  • Live status messages in Apify Console showing progress & cost
+ *  • Uses apify-actor-start synthetic event (configured in Console)
+ *
+ * Performance features (inherited from v2):
+ *  • Adaptive scroll delay — waits for real DOM change, not a fixed timer
+ *  • Rich data extracted from LIST view — minimal detail-page visits
+ *  • Block-list for media/fonts/analytics to cut bandwidth ~60%
+ *  • Graceful abort handler for clean user cancellation
  */
 
 import { Actor } from 'apify';
@@ -28,6 +31,14 @@ Actor.on('aborting', async () => {
 
 // Initialize the Apify SDK
 await Actor.init();
+
+// ─── PPE: Log spending limit ─────────────────────────────────────────────────
+const maxTotalChargeUsd = parseFloat(process.env.ACTOR_MAX_TOTAL_CHARGE_USD || '0');
+if (maxTotalChargeUsd > 0) {
+    log.info(`[PPE] User spending limit: $${maxTotalChargeUsd.toFixed(2)}`);
+} else {
+    log.info('[PPE] No user spending limit set (ACTOR_MAX_TOTAL_CHARGE_USD not configured).');
+}
 
 // Get input from the Actor
 const input = await Actor.getInput();
@@ -57,35 +68,36 @@ if (!proxyConfiguration || !proxyConfiguration.useApifyProxy) {
     throw new Error('Apify Proxy configuration is mandatory for anti-blocking!');
 }
 
-log.info('Starting Local Business Lead Miner v2', {
+log.info('Starting Local Business Lead Miner v3 (PPE)', {
     searchTermsCount: searchTerms.length,
     maxItems,
     includeWebsite,
     includePhone,
     maxScrollDelay: scrollDelay,
+    pricePerLead: '$0.051',
 });
+
+await Actor.setStatusMessage('Starting scraper — configuring proxies and browser...');
 
 // Create proxy configuration
 const proxyConfig = await Actor.createProxyConfiguration({
     ...proxyConfiguration,
-    // checkAccess validates the proxy works before the crawl starts
     checkAccess: true,
 });
 
 // Store configuration in global state for access in route handlers
-// (route handlers run in isolated async contexts and cannot share closure vars)
 const crawlerState = (await Actor.getValue('CRAWLER_STATE')) || {};
 crawlerState.maxItems = maxItems;
 crawlerState.includeWebsite = includeWebsite;
 crawlerState.includePhone = includePhone;
 crawlerState.scrollDelay = scrollDelay;
 crawlerState.scrapedCounts = {};
+// PPE tracking
+crawlerState.totalCharged = 0;
+crawlerState.chargeAborted = false;
 await Actor.setValue('CRAWLER_STATE', crawlerState);
 
 // Generate start URLs — one per search term
-// Force hl=en so Google serves English-language HTML regardless of proxy
-// IP geolocation (avoids hl=ar, hl=ru etc. being injected by the proxy,
-// which changes the page structure and causes parsing failures).
 const startUrls = searchTerms.map((searchTerm) => {
     const encodedQuery = encodeURIComponent(searchTerm);
     return {
@@ -99,38 +111,33 @@ const startUrls = searchTerms.map((searchTerm) => {
 });
 
 log.info(`Generated ${startUrls.length} start URLs from search terms`);
+await Actor.setStatusMessage(`Processing ${searchTerms.length} search term(s) — 0 leads extracted so far...`);
 
 // ─── Crawler initialisation ───────────────────────────────────────────────────
 const crawler = new PlaywrightCrawler({
     proxyConfiguration: proxyConfig,
     requestHandler: router,
 
-    // ── Session pool — maintains warmed-up browser sessions for anti-blocking ──
+    // ── Session pool ──────────────────────────────────────────────────────────
     useSessionPool: true,
     persistCookiesPerSession: true,
     sessionPoolOptions: {
         maxPoolSize: 50,
         sessionOptions: {
-            maxUsageCount: 15,   // reuse sessions longer to amortise startup cost
-            maxErrorScore: 3,    // retire bad sessions faster
+            maxUsageCount: 15,
+            maxErrorScore: 3,
         },
     },
 
     // ── Retry / timeout settings ──────────────────────────────────────────────
-    maxRequestRetries: 2,        // 2 is enough — retries burn time on cloud
-    // maxRequestsPerCrawl accounts for: LIST pages + DETAIL fallback pages
+    maxRequestRetries: 2,
     maxRequestsPerCrawl: searchTerms.length * maxItems * 2,
-    requestHandlerTimeoutSecs: 120,  // generous — cloud containers are slower
-    navigationTimeoutSecs: 60,       // raised from 45: RESIDENTIAL proxies need more
-                                     // headroom on a CPU-throttled Apify container
+    requestHandlerTimeoutSecs: 120,
+    navigationTimeoutSecs: 60,
 
     // ── Concurrency ───────────────────────────────────────────────────────────
-    // Apify FREE/Standard containers are throttled to ~0.25–1 vCPU.
-    // Spawning 15 Chrome processes causes cpuInfo.isOverloaded → autoscaler
-    // drops concurrency to 2 anyway, wasting the warm-up time.
-    // 5 concurrent browsers is the sweet spot: fast enough, within CPU budget.
     maxConcurrency: 5,
-    minConcurrency: 1,   // let the autoscaler ramp up freely from 1
+    minConcurrency: 1,
 
     // ── Browser launch flags ──────────────────────────────────────────────────
     launchContext: {
@@ -145,7 +152,6 @@ const crawler = new PlaywrightCrawler({
                 '--disable-web-security',
                 '--disable-features=IsolateOrigins,site-per-process',
                 '--window-size=1920,1080',
-                // Disable unnecessary background services
                 '--disable-background-networking',
                 '--disable-default-apps',
                 '--disable-extensions',
@@ -156,7 +162,7 @@ const crawler = new PlaywrightCrawler({
         },
     },
 
-    // ── Browser fingerprinting — rotated per session for stealth ─────────────
+    // ── Browser fingerprinting ────────────────────────────────────────────────
     browserPoolOptions: {
         useFingerprints: true,
         fingerprintOptions: {
@@ -171,10 +177,6 @@ const crawler = new PlaywrightCrawler({
     // ── Pre-navigation hooks ──────────────────────────────────────────────────
     preNavigationHooks: [
         async ({ page, request, log: hookLog }) => {
-            // ── Block resources that waste bandwidth and slow page loads ──────
-            // Images, fonts, and analytics do not affect the DOM data we need.
-            // On Apify cloud containers, blocking images cuts ~40% of bandwidth,
-            // directly reducing CPU time spent on image decoding & layout.
             await page.route(
                 (url) => {
                     const u = url.toString();
@@ -183,7 +185,7 @@ const crawler = new PlaywrightCrawler({
                         u.includes('googletagmanager') ||
                         u.includes('doubleclick') ||
                         u.includes('googlesyndication') ||
-                        u.includes('/maps/api/js/') && u.includes('librariesOnly') ||
+                        (u.includes('/maps/api/js/') && u.includes('librariesOnly')) ||
                         /\.(woff2?|ttf|otf|eot)(\?|$)/i.test(u) ||
                         /\.(png|jpg|jpeg|gif|webp|svg|ico)(\?|$)/i.test(u)
                     );
@@ -191,10 +193,9 @@ const crawler = new PlaywrightCrawler({
                 (route) => route.abort(),
             );
 
-            // Set realistic browser headers
             await page.setExtraHTTPHeaders({
                 'Accept-Language': 'en-US,en;q=0.9',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
             });
 
             hookLog.debug(`Navigating to: ${request.url}`);
@@ -217,11 +218,24 @@ await crawler.run(startUrls);
 // ─── Final stats ──────────────────────────────────────────────────────────────
 const finalState = await Actor.getValue('CRAWLER_STATE');
 const dataset = await Actor.openDataset();
-const dataInfo = await dataset.getData({ limit: 1 }); // just need the count
+const dataInfo = await dataset.getData({ limit: 1 });
 
-log.info('✅ Scraping completed!', {
-    totalScraped: dataInfo.total,
+const totalLeads = dataInfo.total;
+const totalCharged = finalState?.totalCharged || 0;
+const wasAborted = finalState?.chargeAborted || false;
+const estimatedCost = (totalCharged * 0.051).toFixed(2);
+
+const finalMessage = wasAborted
+    ? `✅ Completed (stopped at spending limit): ${totalLeads} leads extracted — ~$${estimatedCost} charged`
+    : `✅ Scraping completed: ${totalLeads} leads extracted — ~$${estimatedCost} charged`;
+
+log.info(finalMessage, {
+    totalScraped: totalLeads,
+    totalEventsCharged: totalCharged,
+    estimatedCostUsd: estimatedCost,
     bySearchTerm: finalState?.scrapedCounts || {},
+    stoppedBySpendingLimit: wasAborted,
 });
 
+await Actor.setStatusMessage(finalMessage);
 await Actor.exit();

@@ -1,10 +1,10 @@
 {
     "name": "local-business-lead-miner",
-    "version": "2.0.2",
+    "version": "3.0.0",
     "type": "module",
-    "description": "High-performance Apify Actor for scraping local business leads from Google Maps",
+    "description": "High-performance Apify Actor for scraping local business leads from Google Maps — Pay Per Event pricing",
     "dependencies": {
-        "apify": "^3.5.2",
+        "apify": "^3.7.0",
         "crawlee": "^3.15.3",
         "@crawlee/playwright": "^3.15.3",
         "playwright": "1.57.0",

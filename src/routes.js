@@ -1,31 +1,38 @@
 /**
- * Route handlers for Google Maps scraping — v2.0
+ * Route handlers for Google Maps scraping — v3.0 (PPE Edition)
  *
- * Key changes vs v1:
- *  1. Page-load wait: replaced `networkidle` (up to 30 s) with a targeted
- *     `waitForSelector` that resolves as soon as the feed is ready (~2–4 s).
- *  2. Scroll delay: replaced `sleep(scrollDelay)` with an adaptive wait that
- *     resolves as soon as new list items appear in the DOM (or after max
- *     scrollDelay ms, whichever is first).  Typical savings: 600–1500 ms per
- *     scroll round.
- *  3. Rich list-view extraction: phone, website, category, address, rating,
- *     reviewCount, and hours are all parsed from the sidebar card HTML.  For
- *     the vast majority of businesses this means ZERO detail-page visits.
- *  4. DETAIL fallback: if any of the customer-requested fields (phone /
- *     website) are still null after list extraction, the detail page IS visited
- *     so data quality is never compromised.
- *  5. Removed every debug `page.evaluate` / `page.$$eval` call that fired on
- *     every scroll iteration — those were browser round-trips on the hot path.
- *  6. Data cleaning: all text fields are trimmed + normalised; phone numbers
- *     are validated (≥7 digits); websites are unwrapped from Google redirects
- *     and validated as proper URLs.
- *  7. Output schema is identical to v1 — customers see the same field names.
+ * Pay Per Event changes:
+ *  1. pushBusinessData() charges $0.051 per lead via Actor.charge()
+ *  2. Checks eventChargeLimitReached to gracefully abort the crawler
+ *  3. Tracks charge count in CRAWLER_STATE for status messages
+ *  4. Updates Actor.setStatusMessage() after every lead for live Console feedback
+ *  5. Both LIST and DETAIL handlers check if charge limit was already reached
+ *     before doing expensive work (browser navigation, DOM extraction)
+ *
+ * Inherited from v2:
+ *  • Adaptive scroll delay (resolves on DOM change, not fixed timer)
+ *  • Rich list-view extraction (phone, website, category — zero detail visits)
+ *  • DETAIL fallback only when genuinely missing phone/website
+ *  • Single $$eval per scroll cycle (minimal browser round-trips)
+ *  • Data cleaning: trimmed fields, validated phones, unwrapped Google redirects
  */
 
 import { Actor } from 'apify';
 import { createPlaywrightRouter, sleep } from 'crawlee';
 
 export const router = createPlaywrightRouter();
+
+// ─── PPE Event Name ──────────────────────────────────────────────────────────
+const PPE_EVENT_NAME = 'lead-extracted';
+const PPE_PRICE_PER_LEAD = 0.051; // $0.051 per lead ($51 per 1,000)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helper: Check if charging was already aborted (spending limit hit)
+// ─────────────────────────────────────────────────────────────────────────────
+async function isChargeAborted() {
+    const state = await Actor.getValue('CRAWLER_STATE');
+    return state?.chargeAborted === true;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // LIST Handler
@@ -35,12 +42,16 @@ router.addHandler('LIST', async ({ page, request, log, crawler }) => {
     const state = await Actor.getValue('CRAWLER_STATE');
     const { maxItems, scrollDelay, includeWebsite, includePhone } = state;
 
+    // PPE: Skip work if charge limit was already reached
+    if (state.chargeAborted) {
+        log.info(`[LIST] Skipping "${searchTerm}" — spending limit already reached.`);
+        return;
+    }
+
     log.info(`[LIST] Processing: "${searchTerm}"`, { scrapedCount, maxItems });
 
     try {
         // ── 1. Wait only for the feed — NOT for networkidle ──────────────────
-        // networkidle can take up to 30 s on Google Maps because the page keeps
-        // firing analytics pings. We only care that the result cards exist.
         const FEED_SELECTORS = [
             'div[role="feed"]',
             'div[role="main"]',
@@ -49,7 +60,6 @@ router.addHandler('LIST', async ({ page, request, log, crawler }) => {
             '[aria-label*="results" i]',
         ];
 
-        // Kick off domcontentloaded in parallel while we look for the feed
         await page.waitForLoadState('domcontentloaded', { timeout: 20000 }).catch(() => {});
 
         // ── 2. Cookie consent (fast path) ─────────────────────────────────────
@@ -72,7 +82,7 @@ router.addHandler('LIST', async ({ page, request, log, crawler }) => {
             const pageTitle = await page.title();
             throw new Error(
                 `Could not find results sidebar. Page title: "${pageTitle}". ` +
-                `Debug screenshot saved as "debug-no-sidebar".`,
+                    `Debug screenshot saved as "debug-no-sidebar".`,
             );
         }
 
@@ -98,13 +108,16 @@ router.addHandler('LIST', async ({ page, request, log, crawler }) => {
         for (const businessData of businessLinks) {
             if (scrapedCount + processedCount >= maxItems) break;
 
+            // PPE: Re-check if limit was hit during this loop
+            if (await isChargeAborted()) {
+                log.info(`[LIST] Stopping loop for "${searchTerm}" — spending limit reached.`);
+                break;
+            }
+
             const needsPhone = includePhone && !businessData.phone;
             const needsWebsite = includeWebsite && !businessData.website;
 
             if ((needsPhone || needsWebsite) && businessData.detailUrl) {
-                // Force hl=en on detail URLs so Google serves English HTML
-                // regardless of the proxy IP's geolocation (prevents hl=ar,
-                // hl=ru etc. being injected, which alters the page structure).
                 let { detailUrl } = businessData;
                 try {
                     const u = new URL(detailUrl);
@@ -114,7 +127,6 @@ router.addHandler('LIST', async ({ page, request, log, crawler }) => {
                     // keep original if URL parsing fails
                 }
 
-                // Fallback: visit detail page to fill in missing fields
                 await crawler.addRequests([
                     {
                         url: detailUrl,
@@ -124,14 +136,15 @@ router.addHandler('LIST', async ({ page, request, log, crawler }) => {
                 ]);
                 log.debug(`[LIST] Enqueued DETAIL fallback: "${businessData.name}"`);
             } else {
-                await pushBusinessData(businessData, searchTerm, log);
+                await pushBusinessData(businessData, searchTerm, log, crawler);
                 processedCount++;
             }
         }
 
         // Update scraped count in shared state
-        state.scrapedCounts[searchTerm] = (state.scrapedCounts[searchTerm] || 0) + processedCount;
-        await Actor.setValue('CRAWLER_STATE', state);
+        const freshState = await Actor.getValue('CRAWLER_STATE');
+        freshState.scrapedCounts[searchTerm] = (freshState.scrapedCounts[searchTerm] || 0) + processedCount;
+        await Actor.setValue('CRAWLER_STATE', freshState);
 
         log.info(`[LIST] Done for "${searchTerm}" — pushed ${processedCount} directly, rest via DETAIL fallback.`);
     } catch (error) {
@@ -144,25 +157,26 @@ router.addHandler('LIST', async ({ page, request, log, crawler }) => {
 // DETAIL Fallback Handler
 // Only called when list-view data was genuinely missing phone / website.
 // ─────────────────────────────────────────────────────────────────────────────
-router.addHandler('DETAIL', async ({ page, request, log }) => {
+router.addHandler('DETAIL', async ({ page, request, log, crawler }) => {
     const { searchTerm, businessData } = request.userData;
+
+    // PPE: Skip if charge limit was already reached
+    if (await isChargeAborted()) {
+        log.info(`[DETAIL] Skipping "${businessData.name}" — spending limit already reached.`);
+        return;
+    }
 
     log.info(`[DETAIL] Fetching missing data for: "${businessData.name}"`);
 
     try {
-        // Wait for the main content panel — not networkidle.
-        // On Apify cloud the container may be CPU-throttled, so give it 30s.
         await page.waitForSelector('div[role="main"]', { timeout: 30000 }).catch(() => {});
 
-        // Wait for the phone or website button to appear (up to 8s).
-        // This replaces the old blind sleep(800) — we stop waiting the instant
-        // the data we need is in the DOM, saving ~400–600 ms per detail page.
         await page
             .waitForSelector(
                 'a[href^="tel:"], button[data-item-id*="phone"], a[data-item-id="authority"], a[href*="http"][data-item-id*="website"]',
                 { timeout: 8000 },
             )
-            .catch(() => {}); // fine if no phone/website — we just try to extract
+            .catch(() => {});
 
         if (!businessData.phone) {
             businessData.phone = await extractPhone(page, log);
@@ -183,7 +197,7 @@ router.addHandler('DETAIL', async ({ page, request, log }) => {
             businessData.category = await extractCategory(page, log);
         }
 
-        await pushBusinessData(businessData, searchTerm, log);
+        await pushBusinessData(businessData, searchTerm, log, crawler);
 
         const state = await Actor.getValue('CRAWLER_STATE');
         state.scrapedCounts[searchTerm] = (state.scrapedCounts[searchTerm] || 0) + 1;
@@ -191,7 +205,7 @@ router.addHandler('DETAIL', async ({ page, request, log }) => {
     } catch (error) {
         log.error(`[DETAIL] Error for "${businessData.name}": ${error.message}`);
         // Always push — partial data is better than no data for the customer
-        await pushBusinessData(businessData, searchTerm, log);
+        await pushBusinessData(businessData, searchTerm, log, crawler);
     }
 });
 
@@ -205,15 +219,13 @@ async function autoScrollAndExtract(page, scrollContainer, maxItems, maxScrollDe
     const seenUrls = new Set();
     let scrollAttempts = 0;
     const MAX_SCROLL_ATTEMPTS = 50;
-    let staleRounds = 0; // rounds with zero new results
+    let staleRounds = 0;
 
     log.info(`[SCROLL] Starting adaptive scroll (max delay: ${maxScrollDelay} ms)`);
 
     while (businesses.length < maxItems && scrollAttempts < MAX_SCROLL_ATTEMPTS) {
-        // ── Extract all currently visible business cards ──────────────────────
         const currentBusinesses = await extractBusinessesFromPage(page, sidebarSelector, log);
 
-        // ── Deduplicate ───────────────────────────────────────────────────────
         const prevCount = businesses.length;
         for (const biz of currentBusinesses) {
             if (!seenUrls.has(biz.detailUrl) && businesses.length < maxItems) {
@@ -236,12 +248,9 @@ async function autoScrollAndExtract(page, scrollContainer, maxItems, maxScrollDe
 
         if (businesses.length >= maxItems) break;
 
-        // ── Scroll the sidebar ────────────────────────────────────────────────
         const countBefore = businesses.length;
         await scrollContainer.evaluate((el) => el.scrollBy(0, el.clientHeight));
 
-        // ── Adaptive wait: resolve as soon as card count increases ────────────
-        // This avoids sleeping the full maxScrollDelay when results load fast.
         try {
             await page.waitForFunction(
                 ({ sel, minCount }) => {
@@ -264,162 +273,141 @@ async function autoScrollAndExtract(page, scrollContainer, maxItems, maxScrollDe
 
 // ─────────────────────────────────────────────────────────────────────────────
 // extractBusinessesFromPage
-// Pulls all the rich data available in the sidebar cards in a single $$eval
-// (one browser round-trip per scroll cycle, not multiple).
+// Pulls all the rich data available in the sidebar cards in a single $$eval.
 // ─────────────────────────────────────────────────────────────────────────────
 async function extractBusinessesFromPage(page, sidebarSelector, log) {
     try {
-        // Primary: structured card extraction
-        const primary = await page.$$eval(
-            `${sidebarSelector} a[href*="/maps/place/"]`,
-            (anchors) => {
-                /**
-                 * Walk up from an anchor until we find a "card" container —
-                 * identified by having a heading child and a meaningful size.
-                 */
-                function findCard(el) {
-                    let node = el.parentElement;
-                    for (let i = 0; i < 6; i++) {
-                        if (!node) break;
-                        const heading = node.querySelector(
-                            'div[role="heading"], div.fontHeadlineSmall, div.fontHeadlineLarge',
-                        );
-                        if (heading) return node;
-                        node = node.parentElement;
-                    }
-                    return el.parentElement;
-                }
-
-                /**
-                 * Clean a text string: trim, collapse whitespace, remove
-                 * leading/trailing bullets and middot separators.
-                 */
-                function clean(str) {
-                    if (!str) return '';
-                    return str.replace(/\s+/g, ' ').trim().replace(/^[·•\-–—]+\s*/, '').replace(/\s*[·•\-–—]+$/, '');
-                }
-
-                const seen = new Set();
-                const results = [];
-
-                for (const anchor of anchors) {
-                    const detailUrl = anchor.href;
-                    if (!detailUrl || seen.has(detailUrl)) continue;
-
-                    const card = findCard(anchor);
-                    if (!card) continue;
-
-                    // ── Business name ─────────────────────────────────────────
-                    let name = '';
-                    const headingEl = card.querySelector(
+        const primary = await page.$$eval(`${sidebarSelector} a[href*="/maps/place/"]`, (anchors) => {
+            function findCard(el) {
+                let node = el.parentElement;
+                for (let i = 0; i < 6; i++) {
+                    if (!node) break;
+                    const heading = node.querySelector(
                         'div[role="heading"], div.fontHeadlineSmall, div.fontHeadlineLarge',
                     );
-                    if (headingEl) {
-                        name = clean(headingEl.textContent);
-                    }
-                    if (!name) {
-                        name = clean(anchor.getAttribute('aria-label') || '');
-                    }
-                    if (!name || name.length < 2) continue;
+                    if (heading) return node;
+                    node = node.parentElement;
+                }
+                return el.parentElement;
+            }
 
-                    // ── Rating ────────────────────────────────────────────────
-                    let rating = null;
-                    let reviewCount = null;
-                    const ratingImg = card.querySelector('span[role="img"][aria-label]');
-                    if (ratingImg) {
-                        const label = ratingImg.getAttribute('aria-label') || '';
-                        const ratingM = label.match(/([\d.]+)\s*star/i);
-                        if (ratingM) rating = parseFloat(ratingM[1]);
-                        // Review count can be "stars and 123 reviews" or "1,234 reviews"
-                        const reviewM = label.match(/([\d,]+)\s+review/i);
-                        if (reviewM) reviewCount = parseInt(reviewM[1].replace(/,/g, ''), 10);
-                    }
-                    // Some cards put review count in a separate span
-                    if (reviewCount === null) {
-                        const reviewSpan = card.querySelector('span[aria-label*="review" i]');
-                        if (reviewSpan) {
-                            const m = (reviewSpan.getAttribute('aria-label') || reviewSpan.textContent).match(/([\d,]+)/);
-                            if (m) reviewCount = parseInt(m[1].replace(/,/g, ''), 10);
-                        }
-                    }
+            function clean(str) {
+                if (!str) return '';
+                return str
+                    .replace(/\s+/g, ' ')
+                    .trim()
+                    .replace(/^[·•\-–—]+\s*/, '')
+                    .replace(/\s*[·•\-–—]+$/, '');
+            }
 
-                    // ── Category, address, phone, website from info rows ──────
-                    // Google renders these as small descriptive divs below the name.
-                    let category = '';
-                    let address = '';
-                    let phone = null;
-                    let website = null;
+            const seen = new Set();
+            const results = [];
 
-                    // Collect all leaf text nodes in the card
-                    const infoTexts = [];
-                    const infoEls = card.querySelectorAll('div, span');
-                    for (const el of infoEls) {
-                        // Skip containers that have child elements (only want leaf text)
-                        if (el.children.length > 0) continue;
-                        const t = clean(el.textContent);
-                        if (t && t !== name && t.length > 1) infoTexts.push(t);
+            for (const anchor of anchors) {
+                const detailUrl = anchor.href;
+                if (!detailUrl || seen.has(detailUrl)) continue;
+
+                const card = findCard(anchor);
+                if (!card) continue;
+
+                let name = '';
+                const headingEl = card.querySelector(
+                    'div[role="heading"], div.fontHeadlineSmall, div.fontHeadlineLarge',
+                );
+                if (headingEl) {
+                    name = clean(headingEl.textContent);
+                }
+                if (!name) {
+                    name = clean(anchor.getAttribute('aria-label') || '');
+                }
+                if (!name || name.length < 2) continue;
+
+                let rating = null;
+                let reviewCount = null;
+                const ratingImg = card.querySelector('span[role="img"][aria-label]');
+                if (ratingImg) {
+                    const label = ratingImg.getAttribute('aria-label') || '';
+                    const ratingM = label.match(/([\d.]+)\s*star/i);
+                    if (ratingM) rating = parseFloat(ratingM[1]);
+                    const reviewM = label.match(/([\d,]+)\s+review/i);
+                    if (reviewM) reviewCount = parseInt(reviewM[1].replace(/,/g, ''), 10);
+                }
+                if (reviewCount === null) {
+                    const reviewSpan = card.querySelector('span[aria-label*="review" i]');
+                    if (reviewSpan) {
+                        const m = (reviewSpan.getAttribute('aria-label') || reviewSpan.textContent).match(/([\d,]+)/);
+                        if (m) reviewCount = parseInt(m[1].replace(/,/g, ''), 10);
                     }
-
-                    for (const t of infoTexts) {
-                        // Phone: starts with +, (, or digits and has ≥7 digits
-                        if (!phone && /^[\d\s()+-]{7,}$/u.test(t) && t.replace(/\D/g, '').length >= 7) {
-                            phone = t;
-                            continue;
-                        }
-                        // Website-like short string (no spaces, has a dot)
-                        if (!website && /^https?:\/\//i.test(t)) {
-                            website = t;
-                            continue;
-                        }
-                        // Address: contains a number and a comma or directional
-                        if (!address && /\d/.test(t) && (t.includes(',') || /\b(St|Ave|Rd|Blvd|Dr|Ln|Way|Nagar|Marg|Road|Colony|Sector)\b/i.test(t))) {
-                            address = t;
-                            continue;
-                        }
-                        // Category: short, no digits, appears before address
-                        if (!category && !address && t.length < 60 && !/\d/.test(t) && t.length > 2) {
-                            // Reject generic UI labels
-                            if (!/^(open|closed|website|directions|call|saved|share|more)/i.test(t)) {
-                                category = t.split('·')[0].trim();
-                            }
-                        }
-                    }
-
-                    // ── Website from anchor href in card ──────────────────────
-                    if (!website) {
-                        const websiteAnchor = card.querySelector(
-                            'a[data-item-id="authority"], a[data-item-id*="website"], a[aria-label*="website" i]',
-                        );
-                        if (websiteAnchor) {
-                            try {
-                                const raw = websiteAnchor.href || '';
-                                const urlObj = new URL(raw);
-                                website = urlObj.searchParams.get('url') || raw;
-                            } catch {
-                                website = websiteAnchor.href || null;
-                            }
-                        }
-                    }
-
-                    // ── Phone from tel: anchor ────────────────────────────────
-                    if (!phone) {
-                        const telAnchor = card.querySelector('a[href^="tel:"]');
-                        if (telAnchor) {
-                            phone = decodeURIComponent(telAnchor.href.replace('tel:', '').trim());
-                        }
-                    }
-
-                    seen.add(detailUrl);
-                    results.push({ name, address, rating, reviewCount, category, detailUrl, phone, website });
                 }
 
-                return results;
-            },
-        );
+                let category = '';
+                let address = '';
+                let phone = null;
+                let website = null;
+
+                const infoTexts = [];
+                const infoEls = card.querySelectorAll('div, span');
+                for (const el of infoEls) {
+                    if (el.children.length > 0) continue;
+                    const t = clean(el.textContent);
+                    if (t && t !== name && t.length > 1) infoTexts.push(t);
+                }
+
+                for (const t of infoTexts) {
+                    if (!phone && /^[\d\s()+-]{7,}$/u.test(t) && t.replace(/\D/g, '').length >= 7) {
+                        phone = t;
+                        continue;
+                    }
+                    if (!website && /^https?:\/\//i.test(t)) {
+                        website = t;
+                        continue;
+                    }
+                    if (
+                        !address &&
+                        /\d/.test(t) &&
+                        (t.includes(',') || /\b(St|Ave|Rd|Blvd|Dr|Ln|Way|Nagar|Marg|Road|Colony|Sector)\b/i.test(t))
+                    ) {
+                        address = t;
+                        continue;
+                    }
+                    if (!category && !address && t.length < 60 && !/\d/.test(t) && t.length > 2) {
+                        if (!/^(open|closed|website|directions|call|saved|share|more)/i.test(t)) {
+                            category = t.split('·')[0].trim();
+                        }
+                    }
+                }
+
+                if (!website) {
+                    const websiteAnchor = card.querySelector(
+                        'a[data-item-id="authority"], a[data-item-id*="website"], a[aria-label*="website" i]',
+                    );
+                    if (websiteAnchor) {
+                        try {
+                            const raw = websiteAnchor.href || '';
+                            const urlObj = new URL(raw);
+                            website = urlObj.searchParams.get('url') || raw;
+                        } catch {
+                            website = websiteAnchor.href || null;
+                        }
+                    }
+                }
+
+                if (!phone) {
+                    const telAnchor = card.querySelector('a[href^="tel:"]');
+                    if (telAnchor) {
+                        phone = decodeURIComponent(telAnchor.href.replace('tel:', '').trim());
+                    }
+                }
+
+                seen.add(detailUrl);
+                results.push({ name, address, rating, reviewCount, category, detailUrl, phone, website });
+            }
+
+            return results;
+        });
 
         if (primary.length > 0) return primary;
 
-        // ── Fallback: bare-minimum extraction (name + URL only) ───────────────
         log.debug('[EXTRACT] Primary extraction returned 0 — trying fallback');
         const fallback = await page.$$eval('a[href*="/maps/place/"]', (anchors) => {
             const seen = new Set();
@@ -430,7 +418,16 @@ async function extractBusinessesFromPage(page, sidebarSelector, log) {
                     const name = (el.getAttribute('aria-label') || '').trim();
                     if (!name || name.length < 2) return null;
                     seen.add(detailUrl);
-                    return { name, address: '', rating: null, reviewCount: null, category: '', detailUrl, phone: null, website: null };
+                    return {
+                        name,
+                        address: '',
+                        rating: null,
+                        reviewCount: null,
+                        category: '',
+                        detailUrl,
+                        phone: null,
+                        website: null,
+                    };
                 })
                 .filter(Boolean);
         });
@@ -447,12 +444,8 @@ async function extractBusinessesFromPage(page, sidebarSelector, log) {
 // Detail-page helpers (used only in the DETAIL fallback handler)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Extract and validate phone number from the detail page.
- */
 async function extractPhone(page, log) {
     try {
-        // Ordered by reliability on current Google Maps HTML
         const selectors = [
             'a[href^="tel:"]',
             'button[data-item-id*="phone"]',
@@ -464,8 +457,8 @@ async function extractPhone(page, log) {
             const el = await page.$(sel);
             if (!el) continue;
 
-            const raw = await el.evaluate((node) =>
-                node.getAttribute('href') || node.textContent || node.getAttribute('aria-label') || '',
+            const raw = await el.evaluate(
+                (node) => node.getAttribute('href') || node.textContent || node.getAttribute('aria-label') || '',
             );
             const cleaned = raw.replace(/^tel:/, '').trim();
             const digits = cleaned.replace(/\D/g, '');
@@ -481,10 +474,6 @@ async function extractPhone(page, log) {
     }
 }
 
-/**
- * Extract and clean website URL from the detail page.
- * Unwraps Google redirect URLs (/url?q=...) to expose the real domain.
- */
 async function extractWebsite(page, log) {
     try {
         const selectors = [
@@ -501,12 +490,10 @@ async function extractWebsite(page, log) {
             const href = await el.evaluate((node) => node.href || '');
             if (!href.startsWith('http')) continue;
 
-            // Unwrap Google redirect
             let finalUrl = href;
             try {
                 const u = new URL(href);
                 finalUrl = u.searchParams.get('url') || u.searchParams.get('q') || href;
-                // Validate — fall back to raw href if unwrapped value is not a valid URL
                 if (!isValidUrl(finalUrl)) finalUrl = href;
             } catch {
                 finalUrl = href;
@@ -521,9 +508,6 @@ async function extractWebsite(page, log) {
     }
 }
 
-/**
- * Extract star rating from detail page.
- */
 async function extractRating(page, log) {
     try {
         const el = await page.$('div[role="img"][aria-label*="star" i], span[role="img"][aria-label*="star" i]');
@@ -539,16 +523,11 @@ async function extractRating(page, log) {
     }
 }
 
-/**
- * Extract review count from detail page.
- */
 async function extractReviewCount(page, log) {
     try {
         const el = await page.$('button[aria-label*="review" i], span[aria-label*="review" i]');
         if (el) {
-            const text = await el.evaluate(
-                (node) => node.getAttribute('aria-label') || node.textContent || '',
-            );
+            const text = await el.evaluate((node) => node.getAttribute('aria-label') || node.textContent || '');
             const m = text.match(/([\d,]+)/);
             if (m) return parseInt(m[1].replace(/,/g, ''), 10);
         }
@@ -559,9 +538,6 @@ async function extractReviewCount(page, log) {
     }
 }
 
-/**
- * Extract full address from detail page.
- */
 async function extractAddress(page, log) {
     try {
         const el = await page.$(
@@ -579,14 +555,9 @@ async function extractAddress(page, log) {
     }
 }
 
-/**
- * Extract business category from detail page.
- */
 async function extractCategory(page, log) {
     try {
-        const el = await page.$(
-            'button[jsaction*="category"], span[jstcache] button, div.fontBodyMedium span',
-        );
+        const el = await page.$('button[jsaction*="category"], span[jstcache] button, div.fontBodyMedium span');
         if (el) {
             const text = await el.evaluate((node) => node.textContent || '');
             const cleaned = text.replace(/\s+/g, ' ').trim();
@@ -601,12 +572,11 @@ async function extractCategory(page, log) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // handleCookieConsent
-// Fast path: attempts common consent buttons, bails quickly if not found.
 // ─────────────────────────────────────────────────────────────────────────────
 async function handleCookieConsent(page, log) {
     try {
         const CONSENT_SELECTORS = [
-            'button[jsname="higCR"]',          // Google's own consent button
+            'button[jsname="higCR"]',
             'button:has-text("Accept all")',
             'button:has-text("I agree")',
             'button:has-text("Accept")',
@@ -617,10 +587,10 @@ async function handleCookieConsent(page, log) {
         for (const sel of CONSENT_SELECTORS) {
             try {
                 const btn = await page.$(sel);
-                if (btn && await btn.isVisible()) {
+                if (btn && (await btn.isVisible())) {
                     await btn.click();
                     log.info(`[CONSENT] Dismissed via: ${sel}`);
-                    await sleep(600); // brief pause for redirect/reload
+                    await sleep(600);
                     return;
                 }
             } catch {
@@ -632,51 +602,84 @@ async function handleCookieConsent(page, log) {
     }
 }
 
-/**
- * Returns true when `str` is a parseable absolute URL.
- * Uses URL.canParse (Node 19+) with a fallback to try/catch for older runtimes.
- */
 function isValidUrl(str) {
     if (!str) return false;
     if (typeof URL.canParse === 'function') return URL.canParse(str);
-    try { return Boolean(new URL(str)); } catch { return false; }
+    try {
+        return Boolean(new URL(str));
+    } catch {
+        return false;
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// pushBusinessData
-// Normalises and pushes one record to the Apify dataset.
-// Output schema is identical to v1 — no customer-facing breaking changes.
+// pushBusinessData — Production PPE version
+// Normalises data, pushes to dataset, charges the PPE event, and gracefully
+// aborts the crawler if the user's spending limit is reached.
 // ─────────────────────────────────────────────────────────────────────────────
-async function pushBusinessData(businessData, searchTerm, log) {
-    // Normalise phone: remove surrounding whitespace, collapse internal spaces
+async function pushBusinessData(businessData, searchTerm, log, crawler) {
+    // ── Normalise fields ──────────────────────────────────────────────────────
     let phone = businessData.phone ? businessData.phone.replace(/\s+/g, ' ').trim() : null;
-    if (phone && phone.replace(/\D/g, '').length < 7) phone = null; // invalid
+    if (phone && phone.replace(/\D/g, '').length < 7) phone = null;
 
-    // Normalise website: must be a valid URL
     let website = businessData.website ? businessData.website.trim() : null;
     if (website && !isValidUrl(website)) website = null;
 
-    // Normalise rating: must be 0–5
     let rating = businessData.rating != null ? parseFloat(businessData.rating) : null;
     if (rating != null && (Number.isNaN(rating) || rating < 0 || rating > 5)) rating = null;
 
-    // Normalise reviewCount: must be a positive integer
     let reviewCount = businessData.reviewCount != null ? parseInt(businessData.reviewCount, 10) : null;
     if (reviewCount != null && (Number.isNaN(reviewCount) || reviewCount < 0)) reviewCount = null;
 
     const cleanData = {
-        businessName:   businessData.name    ? businessData.name.replace(/\s+/g, ' ').trim() : null,
-        address:        businessData.address ? businessData.address.replace(/\s+/g, ' ').trim() : null,
+        businessName: businessData.name ? businessData.name.replace(/\s+/g, ' ').trim() : null,
+        address: businessData.address ? businessData.address.replace(/\s+/g, ' ').trim() : null,
         website,
         phone,
         rating,
         reviewCount,
-        category:       businessData.category ? businessData.category.replace(/\s+/g, ' ').trim() : null,
-        googleMapsUrl:  businessData.detailUrl || null,
+        category: businessData.category ? businessData.category.replace(/\s+/g, ' ').trim() : null,
+        googleMapsUrl: businessData.detailUrl || null,
         searchTerm,
-        scrapedAt:      new Date().toISOString(),
+        scrapedAt: new Date().toISOString(),
     };
 
+    // ── Push data to dataset ──────────────────────────────────────────────────
     await Actor.pushData(cleanData);
     log.debug(`[PUSH] "${cleanData.businessName}" — phone: ${phone ?? 'null'}, website: ${website ?? 'null'}`);
+
+    // ── PPE: Charge for this lead ─────────────────────────────────────────────
+    try {
+        const chargeResult = await Actor.charge({ eventName: PPE_EVENT_NAME });
+
+        // Update charge counter for status messages
+        const state = await Actor.getValue('CRAWLER_STATE');
+        state.totalCharged = (state.totalCharged || 0) + 1;
+        const totalLeads = state.totalCharged;
+        const estimatedCost = (totalLeads * PPE_PRICE_PER_LEAD).toFixed(2);
+
+        // Live status message in Apify Console
+        await Actor.setStatusMessage(
+            `Scraping in progress — ${totalLeads} leads extracted (~$${estimatedCost} charged)`,
+        );
+
+        // Check if user's spending limit has been reached
+        if (chargeResult?.eventChargeLimitReached) {
+            log.warning(
+                `[PPE] User spending limit reached after ${totalLeads} leads (~$${estimatedCost}). Aborting gracefully.`,
+            );
+            state.chargeAborted = true;
+            await Actor.setValue('CRAWLER_STATE', state);
+
+            // Gracefully stop the Playwright crawler (Crawlee best practice)
+            if (crawler?.autoscaledPool) {
+                await crawler.autoscaledPool.abort();
+            }
+        } else {
+            await Actor.setValue('CRAWLER_STATE', state);
+        }
+    } catch (err) {
+        // Charge failures should not crash the Actor — log and continue
+        log.warning(`[PPE] Failed to charge '${PPE_EVENT_NAME}': ${err.message}`);
+    }
 }

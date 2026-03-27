@@ -3,6 +3,7 @@
 ## Who Pays for What?
 
 ### TL;DR
+
 - **You (Actor Developer):** Pay nothing when others use your Actor ✅
 - **Users:** Pay for their own compute, proxy, and storage usage 💳
 - **Deployment:** FREE to host on Apify platform ✅
@@ -47,6 +48,7 @@
 ### On Apify Platform (Recommended)
 
 **User's Experience:**
+
 ```
 1. User visits your Actor page
 2. Clicks "Try for free" or "Run"
@@ -62,6 +64,7 @@
 ```
 
 **Behind the Scenes:**
+
 ```javascript
 // Your code (main.js)
 const proxyConfig = await Actor.createProxyConfiguration({
@@ -74,6 +77,7 @@ const proxyConfig = await Actor.createProxyConfiguration({
 ```
 
 **Cost Distribution:**
+
 - Actor runs on Apify servers: **User pays compute**
 - Uses Apify Proxy: **User's proxy credits deducted**
 - Stores results: **User's storage quota**
@@ -97,6 +101,7 @@ npm start
 ```
 
 **Cost:**
+
 - Compute: Free (their local machine)
 - Proxy: From their Apify account
 - Your cost: **$0** ✅
@@ -106,6 +111,7 @@ npm start
 ## 💳 Apify Pricing Tiers (For Users)
 
 ### Free Tier (Users Get This)
+
 ```
 ✅ 5 hours compute per month
 ✅ 5,000 residential proxy requests
@@ -120,6 +126,7 @@ Perfect for:
 ```
 
 ### Paid Tier (If Users Need More)
+
 ```
 💰 Pay As You Go:
    - Compute: $0.60/hour
@@ -145,6 +152,7 @@ Perfect for:
 ## 📊 Real-World Cost Examples
 
 ### Example 1: Small Business Owner
+
 ```
 Goal: Scrape 1,000 coffee shops in California
 
@@ -162,6 +170,7 @@ Your Cost: $0 ✅
 ```
 
 ### Example 2: Marketing Agency
+
 ```
 Goal: Scrape 10,000 businesses across multiple cities
 
@@ -185,6 +194,7 @@ Your Actor Saves Them: $137-437! 🎉
 ```
 
 ### Example 3: Enterprise Lead Generation
+
 ```
 Goal: Scrape 100,000 businesses nationwide
 
@@ -215,6 +225,7 @@ Your Actor Saves Them: $1,500-4,500! 🎉
 If you want to earn revenue from your Actor:
 
 ### Option 1: Free Actor (Current)
+
 ```
 Visibility: Public
 Price: FREE
@@ -226,27 +237,28 @@ Benefits:
 - No support obligations
 ```
 
-### Option 2: Paid Actor
+### Option 2: Paid Actor (Pay Per Event)
+
 ```
 Visibility: Public
-Price: $5-50 per run
-Revenue Share: 70% (you) / 30% (Apify)
+Price: $0.051 per lead ($51.00 per 1,000 leads)
+Revenue Share: 80% (you) / 20% (Apify)
 
-Example Pricing:
-- $5 per run (up to 1,000 businesses)
-- $10 per run (up to 5,000 businesses)
-- $25 per run (up to 25,000 businesses)
+Example Pricing (Lead-Extracted Event):
+- $0.051 per lead
 
-If 100 users/month @ $10:
-Your Revenue: $700/month (70% of $1,000)
-Apify Fee: $300/month
-User Still Pays: Compute + Proxy separately
+If 10 users/month extract 500 leads each (5,000 total leads):
+Revenue from Events: $255.00
+Your Share (80%): $204.00
+Platform Costs (Apify deducts compute): ~$1.50
+Your Net Profit: ~$202.50/month
 
-Total User Cost: $10 (to you) + $3-10 (Apify) = $13-20
-Still cheaper than competitors! ✅
+Total User Cost: Usage of events + Apify Compute & Proxy
+Excellent for guaranteed profit margins! ✅
 ```
 
 ### Option 3: Freemium Model
+
 ```
 Free Version:
 - Up to 100 businesses per run
@@ -267,6 +279,7 @@ Best of both worlds! 🎯
 ## 🔒 Security & Privacy
 
 ### What Users CANNOT Access:
+
 ```
 ❌ Your APIFY_TOKEN
 ❌ Your proxy credentials
@@ -277,6 +290,7 @@ Best of both worlds! 🎯
 ```
 
 ### What Users CAN Access:
+
 ```
 ✅ Your Actor's source code (if public)
 ✅ Input/output schemas
@@ -286,6 +300,7 @@ Best of both worlds! 🎯
 ```
 
 ### Credential Isolation:
+
 ```javascript
 // On Apify Platform, this happens automatically:
 
@@ -307,6 +322,7 @@ Perfect isolation! 🔒
 ## 📝 Summary
 
 ### For You (Actor Developer):
+
 ```
 ✅ Zero hosting costs
 ✅ Zero runtime costs
@@ -320,13 +336,14 @@ Total Cost: $0/month 🎉
 ```
 
 ### For Users:
+
 ```
 Option A: Use on Apify Platform
   - Compute: $0.60/hour or free tier
   - Proxy: From their account
   - Storage: From their account
   - Your Actor: FREE (unless you charge)
-  
+
 Option B: Run Locally
   - Compute: Free (their machine)
   - Proxy: From their Apify account
@@ -363,6 +380,7 @@ A: Run on Apify Platform - no setup, auto credentials, easy! ✅
 ## 💡 Recommendation
 
 **For You:**
+
 1. Deploy as FREE public Actor
 2. Build user base
 3. Gather feedback
@@ -370,6 +388,7 @@ A: Run on Apify Platform - no setup, auto credentials, easy! ✅
 5. (Optional) Add paid version later
 
 **For Users:**
+
 1. Use on Apify Platform (easiest)
 2. Free tier perfect for testing/small jobs
 3. Upgrade to paid if needed (still cheaper than competitors)
