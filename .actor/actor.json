@@ -3,7 +3,7 @@
     "name": "local-business-lead-miner",
     "title": "Local Business Lead Miner",
     "description": "High-performance Apify Actor for scraping local business leads from Google Maps with advanced anti-blocking measures",
-    "version": "3.0",
+    "version": "1.0",
     "minMemoryMbytes": 1024,
     "maxMemoryMbytes": 8192,
     "meta": {
